@@ -40,6 +40,8 @@ def copy_a_file(input_file: T.Union[str, os.PathLike], targ_item: T.Union[str, o
     Returns:
         T.Union[str, os.PathLike]: The path to the copied file if successful.
     """
+    if os.path.isdir(targ_item):
+        targ_item = os.path.join(targ_item, os.path.basename(input_file))
     if not os.path.exists(targ_item):
         shutil.copy2(input_file, targ_item)
     elif os.path.getmtime(input_file) > os.path.getmtime(targ_item):
@@ -47,31 +49,8 @@ def copy_a_file(input_file: T.Union[str, os.PathLike], targ_item: T.Union[str, o
             shutil.copy2(input_file, targ_item)
         except Exception as e:
             print(f"Failed to copy {targ_item}\n {e}")
-        return targ_item
-
-
-def copy_file(input_file: T.Union[str, os.PathLike],
-              output_folder: T.Union[str, os.PathLike]) \
-        -> T.Union[str, os.PathLike, None]:
-    """
-    Copy a file to the specified output folder.
-
-    Args:
-        input_file (T.Union[str, os.PathLike]): The file to be copied.
-        output_folder (T.Union[str, os.PathLike]): The destination folder.
-
-    Returns:
-        T.Union[str, os.PathLike, None]: The path to the copied file if successful, None otherwise.
-    """
-    filename = os.path.split(input_file)[1]
-    outpath = os.path.join(output_folder, filename)
-    shutil.copy2(input_file, outpath)
-    if os.path.exists(outpath):
-        print(f"Copied {filename}\n   to {outpath}")
-        return outpath
-    else:
-        print(f"Failed to copy {filename}")
-        return None
+            return None
+    return targ_item
 
 
 def list_folders_matching(input_folder: T.Union[str, os.PathLike],
@@ -220,7 +199,7 @@ def copy_one_to_many(input_file: T.Union[str, os.PathLike],
     copied = []
     if output_folders:
         for folder in output_folders:
-            copy_file(input_file, folder)
+            copy_a_file(input_file, folder)
             copied.append(folder)
 
     # Print results

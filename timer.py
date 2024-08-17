@@ -1,5 +1,6 @@
 import time
 import logging
+from decimal import *
 
 log_path = f"../{__name__}.log"
 logger = logging.getLogger(__name__)
@@ -12,7 +13,8 @@ def timer(func):
         start = time.time()
         result = func(*args, **kwargs)
         end = time.time()
-        logger.info(f"{func.__name__} took {end - start} seconds to execute")
+        getcontext().prec = 2
+        logger.info(f"{func.__name__} took {Decimal(end) - Decimal(start)} seconds to execute")
         return result
 
     return wrapper
