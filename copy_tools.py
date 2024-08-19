@@ -3,6 +3,23 @@ import shutil
 import typing as T
 from timer import timer
 import concurrent.futures
+from multiprocessing import cpu_count
+
+
+def _get_workers(n_files, total_filesize, p: bool) -> int:
+    """
+    Get the number of workers to use for copying files.
+
+    Returns:
+        int: The number of workers to use.
+    """
+    return 1
+    # if total_filesize < 250 and n_files < 100:
+    #     return 1
+    # elif total_filesize < 500 and total_filesize < 100 and p:
+    #     return min(cpu_count(), n_files)
+    # else:
+    #     return min(60, n_files)
 
 
 def get_file_tree(root_loc: T.Union[str, os.PathLike]) -> tuple[dict, int]:
@@ -103,17 +120,35 @@ class CopyOneToMany:
         if self.folder_wildcard:
             self.output_folders = list_folders_matching(self.output_root_folder, self.folder_wildcard)
 
-    def return_output_folders(self):
+        # Call to get the total file size for all folder targets
+        self.total_size = self._get_total_copy_size()
+        if os.path.isdir(self.input_file_or_folder):
+            self.n_workers = _get_workers(n_files=len(self.output_folders),
+                                          total_filesize=self.total_size, p=True)
+        else:
+            self.n_workers = _get_workers(n_files=len(self.output_folders), total_filesize=self.total_size, p=False)
+
+    def _get_total_copy_size(self) -> int:
+        """
+        Get the total size of the file to be copied to all target folders.
+
+        Returns:
+            int: The total size of the file to be copied.
+        """
+        one_filesize = os.path.getsize(self.input_file_or_folder)
+        return int(round(one_filesize * len(self.output_folders) * 1e-6))
+
+    def return_todo_and_workers(self):
         """
         Return the list of output folders matching the wildcard.
 
         Returns:
             list: List of folders matching the wildcard.
         """
-        return self.output_folders
+        return self.output_folders, self.n_workers, self.total_size
 
 
-class CopyTemplateToMultiple:
+class CopyDirTree:
     """
     A class to copy a directory tree to multiple locations.
 
@@ -137,6 +172,7 @@ class CopyTemplateToMultiple:
 
         self.input_tree, self.file_size = get_file_tree(self.input_root)
         self.file_size = int(round(self.file_size * 1e-6))
+        self.n_workers = _get_workers(n_files=len(self.input_tree["files"]), total_filesize=self.file_size, p=False)
 
     def copy_the_tree(self) -> dict:
         """
@@ -162,16 +198,17 @@ class CopyTemplateToMultiple:
 
         # Create files in target location
         # Decide to use threads or not
-        if self.file_size > 250 and len(self.input_tree["files"]) > 10:
+        if self.n_workers > 1:
             futures = []
-            with concurrent.futures.ThreadPoolExecutor() as executor:
+            with concurrent.futures.ThreadPoolExecutor(self.n_workers) as executor:
                 for rel_file, inpath in self.input_tree["files"].items():
                     targ_item = os.path.join(self.output_root_folder, rel_file)
                     futures.append(executor.submit(copy_a_file, inpath, targ_item))
             for future in concurrent.futures.as_completed(futures):
                 if future.result():
                     things_created["files"].append(future.result())
-        # Copy files in main thread
+
+        # Copy files in main thread when not too numerous or large
         for rel_file, inpath in self.input_tree["files"].items():
             targ_item = os.path.join(self.output_root_folder, rel_file)
             things_created["files"].append(copy_a_file(inpath, targ_item))
@@ -192,24 +229,47 @@ def copy_one_to_many(input_file: T.Union[str, os.PathLike],
     """
     # Call the class to copy one to many
     result = CopyOneToMany(input_file, output_root_folder, wildcard)
-    output_folders = result.return_output_folders()
+    output_folders, n_workers, total_size = result.return_todo_and_workers()
 
     # Perform copy on each folder found previously
     print(f"Copying to {len(output_folders)} folders...")
-    copied = []
-    if output_folders:
-        for folder in output_folders:
-            copy_a_file(input_file, folder)
-            copied.append(folder)
+    total_copied = []
+    if not output_folders:
+        raise Exception("No folders found matching the wildcard.")
+    if os.path.isfile(input_file):
+        if n_workers == 1:
+            for folder in output_folders:
+                copy_a_file(input_file, folder)
+                total_copied.append(folder)
+        else:
+            # Uses parallel processing to copy files
+            futures = []
+            with concurrent.futures.ThreadPoolExecutor(n_workers) as executor:
+                for folder in output_folders:
+                    futures.append(executor.submit(copy_a_file, input_file, folder))
+                for future in concurrent.futures.as_completed(futures):
+                    if future.result():
+                        total_copied.append(future.result())
 
-    # Print results
-    for i in range(0, len(copied), 2):
-        print(f'Copied:')
-        print(f"   {copied[:i]}")
+    else:
+        total_size = 0
+        futures = []
+        total_copied = []
+        with concurrent.futures.ThreadPoolExecutor(n_workers) as executor:
+            for folder in output_folders:
+                futures.append(executor.submit(copy_dirtree_template, input_file, folder))
+
+            for future in concurrent.futures.as_completed(futures):
+                copied, n_workers, size = future.result()
+                total_copied.extend(copied)
+                total_size += size
+
+    print(f"Finished copying to {len(total_copied)} folders.")
+    return total_copied, n_workers, total_size
 
 
-def copy_template_to_multiple(input_root: T.Union[str, os.PathLike],
-                              output_root_folder: T.Union[str, os.PathLike]):
+def copy_dirtree_template(input_root: T.Union[str, os.PathLike],
+                          output_root_folder: T.Union[str, os.PathLike]):
     """
     Copy a directory tree to multiple locations.
 
@@ -218,20 +278,16 @@ def copy_template_to_multiple(input_root: T.Union[str, os.PathLike],
         output_root_folder (T.Union[str, os.PathLike]): The root folder containing target locations.
     """
     # Call class to copy a source tree to target folder
-    result = CopyTemplateToMultiple(input_root, output_root_folder)
+    result = CopyDirTree(input_root, output_root_folder)
     things_created = result.copy_the_tree()
     print(f"Finished copying template to {output_root_folder}")
-
-    # Print the results returned as dictionary
-    for ftype, items in things_created.items():
-        print(f"{ftype.capitalize()}:")
-        for item in items:
-            print(f"   {item}")
+    return things_created["files"], result.n_workers, result.file_size
 
 
 if __name__ == "__main__":
     inroot = "/Users/kevin/Library/CloudStorage/OneDrive-kevingabelman/pinal/RFIRM_2023_1204"
     outroot = "/Users/kevin/test"
+    folder_wildcard = "testoutfolder"
 
     # Call function method
-    timer(copy_template_to_multiple)(inroot, outroot)
+    timer(copy_one_to_many)(inroot, outroot, folder_wildcard)
